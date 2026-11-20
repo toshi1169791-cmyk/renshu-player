@@ -79,16 +79,24 @@ main{padding:12px 16px 40px;display:grid;gap:12px}
 .rate{font-size:34px;font-weight:800;font-variant-numeric:tabular-nums;text-align:center;flex:1}
 .presets{display:grid;grid-template-columns:repeat(6,1fr);gap:6px}
 input[type=range]{width:100%;height:40px;accent-color:var(--accent)}
-.mlist{list-style:none;margin:10px 0 0;padding:0;display:grid;gap:8px;max-height:50vh;overflow-y:auto;overscroll-behavior:contain}
-.mlist li{display:grid;grid-template-columns:auto 1fr;gap:6px 8px;align-items:center;border:1px solid var(--line);border-radius:12px;padding:8px}
-.mlist li.near{border-color:var(--marker);box-shadow:inset 4px 0 0 var(--marker)}
-.mnum{background:var(--marker);color:#fff;border-radius:8px;min-width:34px;height:34px;display:grid;place-items:center;font-weight:800}
-.mhead{display:flex;gap:8px;align-items:center;min-width:0}
-.mtime{font-variant-numeric:tabular-nums;font-weight:700;min-width:70px}
-.mhead input{flex:1;min-width:0;min-height:44px;border-radius:10px;border:1px solid var(--line);background:var(--bg);padding:0 10px}
-.mbtns{grid-column:1/-1;display:grid;grid-template-columns:2fr 1fr 1fr 1fr 1fr;gap:6px}
-.mbtns .del{color:var(--danger)}
-.mbtns button{white-space:nowrap;padding:0 4px}
+/* マーカー一覧：枠内スクロールはせず、ページ全体のスクロールに任せる */
+.phead{display:flex;align-items:center;justify-content:space-between;margin-bottom:10px}
+.phead h2{margin:0}
+.mlist{list-style:none;margin:8px 0 0;padding:0;display:grid;gap:6px}
+.mlist.closed{display:none}
+.mrow{display:grid;grid-template-columns:1fr 48px 48px 48px;gap:6px;align-items:stretch;border:1px solid var(--line);border-radius:12px;padding:4px}
+.mrow.near{border-color:var(--marker);box-shadow:inset 4px 0 0 var(--marker)}
+.mrow button{min-height:48px;padding:0}
+.mgo{display:flex;align-items:center;gap:10px;text-align:left;background:transparent;padding:0 6px!important;min-width:0}
+.mnum{background:var(--marker);color:#fff;border-radius:8px;min-width:32px;height:32px;display:grid;place-items:center;font-weight:800;flex:none}
+.mtxt{display:flex;flex-direction:column;min-width:0;line-height:1.25}
+.mtime{font-variant-numeric:tabular-nums;font-weight:700}
+.mlabel{color:var(--muted);font-size:14px;font-weight:500;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.mrow .ma{color:var(--a)} .mrow .mb{color:var(--b)}
+.medit{grid-column:1/-1;display:grid;grid-template-columns:1fr auto auto;gap:6px;padding:4px 2px 2px}
+.medit input{min-width:0;min-height:48px;border-radius:10px;border:1px solid var(--line);background:var(--bg);padding:0 10px}
+.medit button{padding:0 12px!important;white-space:nowrap}
+.medit .del{color:var(--danger)}
 .empty{color:var(--muted);text-align:center;padding:14px 0}
 .hint{color:var(--muted);font-size:14px;line-height:1.6;margin:0}
 .toast{position:fixed;left:50%;bottom:24px;transform:translateX(-50%);background:var(--head);color:var(--bg);padding:12px 18px;border-radius:12px;font-weight:600;opacity:0;pointer-events:none;transition:opacity .2s;max-width:calc(100% - 32px);z-index:20}
@@ -133,7 +141,7 @@ input[type=range]{width:100%;height:40px;accent-color:var(--accent)}
 <main>
   <div class="col">
     <section class="panel">
-      <h2>マーカー</h2>
+      <div class="phead"><h2>マーカー <span id="mcount"></span></h2><button class="small" id="mToggle">一覧を閉じる</button></div>
       <button class="primary" id="addM" style="width:100%;min-height:64px;font-size:20px">＋ 今の位置にマーカー</button>
       <ul class="mlist" id="mlist"></ul>
     </section>
@@ -266,7 +274,7 @@ function loadFile(i){
   song.name = f.name;
   audio.src = URL.createObjectURL(f);
   setPitchLock(); applyRate();
-  view.start = 0; lastTime = 0; peaks = null;
+  view.start = 0; lastTime = 0; peaks = null; editIdx = -1;
   if(saved && (saved.markers.length || saved.a != null)) toast(`保存済み：マーカー ${saved.markers.length}件` + (saved.a != null ? '・A-B区間' : '') + ' を読み込みました');
   if('mediaSession' in navigator){ try{ navigator.mediaSession.metadata = new MediaMetadata({ title: f.name, artist: '練習プレイヤー' }); }catch(e){} }
   renderAll();
@@ -535,40 +543,53 @@ function addMarker(){
 $('#addM').onclick = addMarker;
 $('#addM2').onclick = addMarker;
 
+let editIdx = -1, listClosed = !!prefs.listClosed;
+function applyListClosed(){
+  $('#mlist').classList.toggle('closed', listClosed);
+  $('#mToggle').textContent = listClosed ? '一覧を開く' : '一覧を閉じる';
+}
+$('#mToggle').onclick = () => { listClosed = !listClosed; prefs.listClosed = listClosed; store.set('renshu:prefs', prefs); applyListClosed(); };
+
 function renderMarkers(){
   const ul = $('#mlist'); ul.innerHTML = '';
-  if(!song.markers.length){ const li = document.createElement('li'); li.className = 'empty'; li.style.display = 'block'; li.textContent = curIdx < 0 ? '曲を開くとマーカーを付けられます' : '再生中に「＋」を押すとマーカーが付きます'; ul.appendChild(li); return; }
+  $('#mcount').textContent = song.markers.length ? `（${song.markers.length}）` : '';
+  applyListClosed();
+  lastNear = -2;
+  if(!song.markers.length){ const li = document.createElement('li'); li.className = 'empty'; li.textContent = curIdx < 0 ? '曲を開くとマーカーを付けられます' : '再生中に「＋」を押すとマーカーが付きます'; ul.appendChild(li); return; }
   song.markers.forEach((m, i) => {
-    const li = document.createElement('li'); li.dataset.i = i;
-    li.innerHTML = `<div class="mnum">${i + 1}</div>
-      <div class="mhead"><span class="mtime">${fmt(m.t)}</span><input type="text" placeholder="名前（例：サビ）" maxlength="30"></div>
-      <div class="mbtns">
-        <button class="small" data-act="go">▶ ここへ</button>
-        <button class="small btnA" data-act="a">A</button>
-        <button class="small btnB" data-act="b">B</button>
-        <button class="small" data-act="here" title="今の位置に移動">今へ</button>
-        <button class="small del" data-act="del">削除</button>
-      </div>`;
-    const inp = li.querySelector('input'); inp.value = m.label || '';
-    inp.onchange = () => { m.label = inp.value.trim(); save(); };
-    li.querySelector('.mbtns').onclick = e => {
-      const act = e.target.dataset && e.target.dataset.act; if(!act) return;
+    const li = document.createElement('li'); li.className = 'mrow'; li.dataset.i = i;
+    li.innerHTML = `<button class="mgo" data-act="go" aria-label="マーカー${i + 1}へ移動"><span class="mnum">${i + 1}</span><span class="mtxt"><span class="mtime">${fmt(m.t)}</span><span class="mlabel"></span></span></button>
+      <button class="ma" data-act="a" aria-label="A点にする">A</button>
+      <button class="mb" data-act="b" aria-label="B点にする">B</button>
+      <button data-act="edit" aria-label="名前・削除">${editIdx === i ? '✕' : '✎'}</button>`;
+    li.querySelector('.mlabel').textContent = m.label || 'タップで移動';
+    if(editIdx === i){
+      const ed = document.createElement('div'); ed.className = 'medit';
+      ed.innerHTML = `<input type="text" placeholder="名前（例：サビ）" maxlength="30"><button data-act="here">今の位置へ</button><button class="del" data-act="del">削除</button>`;
+      const inp = ed.querySelector('input'); inp.value = m.label || '';
+      inp.onchange = () => { m.label = inp.value.trim(); save(); li.querySelector('.mlabel').textContent = m.label || 'タップで移動'; };
+      li.appendChild(ed);
+    }
+    li.onclick = e => {
+      const btn = e.target.closest('[data-act]'); if(!btn) return;
+      const act = btn.dataset.act;
       if(act === 'go') seek(m.t);
       else if(act === 'a') setPoint('a', m.t);
       else if(act === 'b'){ if(song.a != null && m.t <= song.a){ toast('B点はA点より後にしてください'); return; } setPoint('b', m.t); }
-      else if(act === 'here'){ m.t = now(); song.markers.sort((x, y) => x.t - y.t); save(); renderMarkers(); drawWave(); }
-      else if(act === 'del'){ if(confirm(`マーカー ${i + 1}（${fmt(m.t)}${m.label ? ' ' + m.label : ''}）を削除しますか？`)){ song.markers.splice(i, 1); save(); renderMarkers(); drawWave(); } }
+      else if(act === 'edit'){ editIdx = editIdx === i ? -1 : i; renderMarkers(); }
+      else if(act === 'here'){ m.t = now(); song.markers.sort((x, y) => x.t - y.t); editIdx = song.markers.indexOf(m); save(); renderMarkers(); drawWave(); }
+      else if(act === 'del'){ if(confirm(`マーカー ${i + 1}（${fmt(m.t)}${m.label ? ' ' + m.label : ''}）を削除しますか？`)){ song.markers.splice(i, 1); editIdx = -1; save(); renderMarkers(); drawWave(); } }
     };
     ul.appendChild(li);
   });
   highlightNear();
 }
-let lastNear = -2;
+var lastNear = -2;
 function highlightNear(){
   const t = now(); let idx = -1;
   song.markers.forEach((m, i) => { if(m.t <= t + 0.05) idx = i; });
   if(idx === lastNear) return; lastNear = idx;
-  document.querySelectorAll('#mlist li').forEach(li => li.classList.toggle('near', +li.dataset.i === idx));
+  document.querySelectorAll('#mlist .mrow').forEach(li => li.classList.toggle('near', +li.dataset.i === idx));
 }
 
 /* ---------- export / import ---------- */
