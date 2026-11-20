@@ -193,7 +193,7 @@ input[type=range]{width:100%;height:40px;accent-color:var(--accent)}
 
     <section class="panel">
       <h2>データ</h2>
-      <p class="hint">マーカーとA-B区間は「ファイル名＋サイズ」で曲ごとに自動保存されます（wav・mp3・m4aなど形式を問いません）。ブラウザのデータを消すと失われるので、ときどき書き出しておくと安心です。</p>
+      <p class="hint">マーカーとA-B区間は「ファイル名（拡張子を除く）」で曲ごとに自動保存されます。wavをm4aに変換しても同じ曲として引き継がれます。Sound it! でマーカーを付けたWAVを開くと、そのマーカーも自動で取り込みます。ブラウザのデータを消すと失われるので、ときどき書き出しておくと安心です。</p>
       <div class="row" style="margin-top:10px">
         <button class="grow" id="exportBtn">💾 書き出し</button>
         <button class="grow" id="importBtn">📥 読み込み</button>
@@ -275,13 +275,60 @@ function savePos(){
 function updateTitle(){
   document.title = curIdx < 0 ? '練習プレイヤー' : (audio.paused ? '♪ ' : '▶ ') + files[curIdx].name;
 }
+// 曲は「拡張子を除いたファイル名」で見分ける（wav → m4a に変換しても同じ曲として扱う）
+function songName(fname){ return fname.replace(/\.[^.]+$/, '').normalize('NFC'); }
+function songKey(fname){ return PREFIX + songName(fname); }
+// 旧バージョン（ファイル名＋サイズで保存）のデータを引き継ぐ
+function migrateOld(f){
+  const old = PREFIX + f.name + '|' + f.size, v = store.get(old);
+  if(v && !store.get(songKey(f.name))){ store.set(songKey(f.name), v); try{ localStorage.removeItem(old); }catch(e){} }
+}
+
+/* Sound it! 8 が WAV に保存したマーカー（iwem チャンク）を読む */
+async function readSoundItMarkers(file){
+  if(!/\.wav$/i.test(file.name)) return [];
+  const view = async (pos, len) => new DataView(await file.slice(pos, pos + len).arrayBuffer());
+  const tag = (dv, o) => String.fromCharCode(dv.getUint8(o), dv.getUint8(o + 1), dv.getUint8(o + 2), dv.getUint8(o + 3));
+  const h = await view(0, 12);
+  if(h.byteLength < 12 || tag(h, 0) !== 'RIFF' || tag(h, 8) !== 'WAVE') return [];
+  let pos = 12, sr = 0, iwem = null;
+  for(let guard = 0; pos + 8 <= file.size && guard < 200; guard++){
+    const c = await view(pos, 8); const id = tag(c, 0), size = c.getUint32(4, true);
+    if(id === 'fmt ') sr = (await view(pos + 8, 8)).getUint32(4, true);
+    else if(id === 'iwem') iwem = new Uint8Array(await file.slice(pos + 8, pos + 8 + size).arrayBuffer());
+    pos += 8 + size + (size & 1);
+  }
+  if(!iwem || !sr) return [];
+  const dv = new DataView(iwem.buffer), dec = new TextDecoder('shift_jis'), out = [];
+  const find = from => { for(let i = from; i + 5 <= iwem.length; i++) if(iwem[i] === 77 && iwem[i+1] === 107 && iwem[i+2] === 84 && iwem[i+3] === 97 && iwem[i+4] === 103) return i; return -1; }; // "MkTag"
+  for(let i = find(0); i >= 0 && i + 17 <= iwem.length; ){
+    const len = dv.getUint32(i + 5), b = i + 9;
+    if(b + 8 > iwem.length) break;
+    const sample = dv.getUint32(b), ll = dv.getUint32(b + 4);
+    let lab = dec.decode(iwem.subarray(b + 8, Math.min(iwem.length, b + 8 + ll)));
+    lab = lab.split(String.fromCharCode(0))[0].trim();
+    out.push({ t: Math.round(sample / sr * 1000) / 1000, label: lab });
+    i = find(b + len);
+  }
+  return out.sort((x, y) => x.t - y.t);
+}
+async function importSoundIt(f, k){
+  try{
+    const ms = await readSoundItMarkers(f);
+    if(!ms.length || k !== key || song.markers.length) return;
+    song.markers = ms; save(); renderMarkers(); drawWave();
+    toast(`Sound it! のマーカー ${ms.length}件を取り込みました`);
+  }catch(e){}
+}
+
 function loadFile(i){
   const f = files[i]; if(!f) return;
   if(i !== curIdx) savePos();          // 切り替え前の曲の位置を保存
   switching = true;
   audio.pause();
   if(audio.src) URL.revokeObjectURL(audio.src);
-  curIdx = i; key = PREFIX + f.name + '|' + f.size;
+  migrateOld(f);
+  curIdx = i; key = songKey(f.name);
   $('#songSel').value = i; $('#title').textContent = f.name;
   const saved = store.get(key);
   song = Object.assign(blankSong(), saved || {});
@@ -299,6 +346,7 @@ function loadFile(i){
   updateTitle();
   renderAll();
   computePeaks(f, key);
+  if(!song.markers.length) importSoundIt(f, key);
 }
 audio.addEventListener('loadedmetadata', () => { applyRate(); renderAll(); });
 audio.addEventListener('error', () => { switching = false; if(curIdx >= 0) toast('この音源はこの端末で再生できない形式です'); });
@@ -632,7 +680,7 @@ $('#exportBtn').onclick = () => {
   store.keys().filter(k => k.startsWith(PREFIX)).forEach(k => data[k.slice(PREFIX.length)] = store.get(k));
   const n = Object.keys(data).length;
   if(!n){ toast('保存データがまだありません'); return; }
-  const blob = new Blob([JSON.stringify({ app: 'renshu-player', version: 1, songs: data }, null, 1)], { type: 'application/json' });
+  const blob = new Blob([JSON.stringify({ app: 'renshu-player', version: 2, songs: data }, null, 1)], { type: 'application/json' });
   const a = document.createElement('a');
   const d = new Date(), pad = x => String(x).padStart(2, '0');
   a.href = URL.createObjectURL(blob);
@@ -648,13 +696,18 @@ $('#importIn').onchange = async e => {
     const j = JSON.parse(await f.text());
     if(!j || j.app !== 'renshu-player' || !j.songs) throw 0;
     let n = 0;
-    for(const [k, v] of Object.entries(j.songs)){
+    let skip = 0;
+    for(let [k, v] of Object.entries(j.songs)){
       if(!v || !Array.isArray(v.markers)) continue;
+      if(!(j.version >= 2)) k = songName(k.replace(/\|\d+$/, ''));   // 旧形式「名前.wav|サイズ」
+      k = k.normalize('NFC');
       const exist = store.get(PREFIX + k);
-      if(exist && exist.updated && v.updated && exist.updated > v.updated) continue; // 新しい方を残す
-      store.set(PREFIX + k, v); n++;
+      // すでにこの端末にデータがある曲は、より新しく編集されたデータの時だけ上書き
+      if(exist && (exist.markers.length || exist.a != null) && !(v.updated && (!exist.updated || v.updated > exist.updated))){ skip++; continue; }
+      if(!store.set(PREFIX + k, v)){ toast('保存領域がいっぱいで、途中までしか読み込めませんでした'); break; }
+      n++;
     }
-    toast(`${n}曲分のデータを読み込みました`);
+    toast(`${n}曲分のデータを読み込みました` + (skip ? `（この端末で編集済みの ${skip}曲はそのまま）` : ''));
     if(curIdx >= 0){ const keep = now(); loadFile(curIdx); audio.addEventListener('loadedmetadata', () => seek(keep), { once: true }); }
   }catch(err){ toast('読み込めないファイルです'); }
 };
