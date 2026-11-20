@@ -231,7 +231,7 @@ let song = blankSong();
 let peaks = null, waveMsg = '「曲を開く」から音源を選んでください';
 const prefs = Object.assign({ height: 's' }, store.get('renshu:prefs') || {});
 const view = { start: 0, zoom: 1 };
-let lastUserScroll = 0, lastTime = 0, wakeLock = null;
+let lastUserScroll = 0, lastTime = 0, wakeLock = null, switching = false, lastPosSave = 0;
 
 function blankSong(){ return { markers: [], a: null, b: null, loop: false, rate: 1 }; }
 function save(){ if(key){ song.updated = Date.now(); if(!store.set(key, song)) toast('保存できませんでした（ストレージ不足？）'); } }
@@ -267,8 +267,18 @@ function renderSongSel(){
   sel.classList.toggle('hidden', !multi);
   $('#title').classList.toggle('hidden', multi);
 }
+// 再生位置を曲ごとに保存（曲の切り替え・一時停止・ページを閉じる時など）
+function savePos(){
+  if(!key || switching || !dur()) return;
+  song.pos = now(); lastPosSave = Date.now(); save();
+}
+function updateTitle(){
+  document.title = curIdx < 0 ? '練習プレイヤー' : (audio.paused ? '♪ ' : '▶ ') + files[curIdx].name;
+}
 function loadFile(i){
   const f = files[i]; if(!f) return;
+  if(i !== curIdx) savePos();          // 切り替え前の曲の位置を保存
+  switching = true;
   audio.pause();
   if(audio.src) URL.revokeObjectURL(audio.src);
   curIdx = i; key = PREFIX + f.name + '|' + f.size;
@@ -281,11 +291,17 @@ function loadFile(i){
   view.start = 0; lastTime = 0; peaks = null; editIdx = -1;
   if(saved && (saved.markers.length || saved.a != null)) toast(`保存済み：マーカー ${saved.markers.length}件` + (saved.a != null ? '・A-B区間' : '') + ' を読み込みました');
   if('mediaSession' in navigator){ try{ navigator.mediaSession.metadata = new MediaMetadata({ title: f.name, artist: '練習プレイヤー' }); }catch(e){} }
+  const startPos = song.pos || 0;
+  audio.addEventListener('loadedmetadata', () => {
+    if(startPos > 0 && startPos < dur() - 0.5){ audio.currentTime = startPos; lastTime = startPos; ensureVisible(true); refresh(); }
+    switching = false;
+  }, { once: true });
+  updateTitle();
   renderAll();
   computePeaks(f, key);
 }
 audio.addEventListener('loadedmetadata', () => { applyRate(); renderAll(); });
-audio.addEventListener('error', () => { if(curIdx >= 0) toast('この音源はこの端末で再生できない形式です'); });
+audio.addEventListener('error', () => { switching = false; if(curIdx >= 0) toast('この音源はこの端末で再生できない形式です'); });
 
 /* ---------- waveform peaks ---------- */
 async function computePeaks(file, k){
@@ -451,9 +467,15 @@ function nextMarker(){
 $('#prevM').onclick = prevMarker;
 $('#nextM').onclick = nextMarker;
 
-audio.addEventListener('play', () => { $('#play').textContent = '❚❚'; requestAnimationFrame(tick); keepAwake(true); });
-audio.addEventListener('pause', () => { $('#play').textContent = '▶'; refresh(); keepAwake(false); });
-audio.addEventListener('timeupdate', () => { checkLoop(); if(document.hidden) return; if(audio.paused) refresh(); });
+audio.addEventListener('play', () => { $('#play').textContent = '❚❚'; requestAnimationFrame(tick); keepAwake(true); updateTitle(); });
+audio.addEventListener('pause', () => { $('#play').textContent = '▶'; refresh(); keepAwake(false); updateTitle(); savePos(); });
+audio.addEventListener('timeupdate', () => {
+  checkLoop();
+  if(!audio.paused && Date.now() - lastPosSave > 5000) savePos();
+  if(document.hidden) return; if(audio.paused) refresh();
+});
+window.addEventListener('pagehide', savePos);
+document.addEventListener('visibilitychange', () => { if(document.hidden) savePos(); });
 audio.addEventListener('ended', () => {
   if(song.loop && song.a != null && song.b != null){ audio.currentTime = song.a; lastTime = song.a; audio.play(); }
 });
