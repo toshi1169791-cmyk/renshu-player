@@ -14,7 +14,8 @@
   --bg:#f3f4f7; --panel:#ffffff; --text:#1b1f27; --muted:#5f6b7c; --line:#d8dde5;
   --btn:#e9edf3; --btn-press:#d5dce7; --accent:#2563eb; --accent-text:#ffffff;
   --a:#15803d; --b:#c2410c; --marker:#b45309; --wave:#a3afc0; --played:#2563eb;
-  --loop:rgba(37,99,235,.14); --head:#111827; --on:#16a34a; --danger:#b91c1c;
+  --loop:rgba(124,58,237,.13); --ab-wave:#c3a6f3; --ab-played:#7c3aed;
+  --head:#111827; --on:#16a34a; --danger:#b91c1c;
   color-scheme: light;
 }
 @media (prefers-color-scheme: dark){
@@ -22,7 +23,8 @@
     --bg:#12161d; --panel:#1b212b; --text:#e8ecf2; --muted:#9aa6b6; --line:#2e3744;
     --btn:#28303c; --btn-press:#343e4d; --accent:#3b82f6; --accent-text:#ffffff;
     --a:#4ade80; --b:#fb923c; --marker:#fbbf24; --wave:#4b5768; --played:#60a5fa;
-    --loop:rgba(96,165,250,.16); --head:#f8fafc; --on:#22c55e; --danger:#f87171;
+    --loop:rgba(167,139,250,.16); --ab-wave:#6f5a9e; --ab-played:#b79cff;
+    --head:#f8fafc; --on:#22c55e; --danger:#f87171;
     color-scheme: dark;
   }
 }
@@ -30,7 +32,8 @@
   --bg:#12161d; --panel:#1b212b; --text:#e8ecf2; --muted:#9aa6b6; --line:#2e3744;
   --btn:#28303c; --btn-press:#343e4d; --accent:#3b82f6; --accent-text:#ffffff;
   --a:#4ade80; --b:#fb923c; --marker:#fbbf24; --wave:#4b5768; --played:#60a5fa;
-  --loop:rgba(96,165,250,.16); --head:#f8fafc; --on:#22c55e; --danger:#f87171;
+  --loop:rgba(167,139,250,.16); --ab-wave:#6f5a9e; --ab-played:#b79cff;
+  --head:#f8fafc; --on:#22c55e; --danger:#f87171;
   color-scheme: dark;
 }
 *{box-sizing:border-box}
@@ -307,7 +310,7 @@ const cv = $('#wave');
 let colors = {};
 function readColors(){
   const cs = getComputedStyle(document.documentElement);
-  ['wave','played','loop','a','b','marker','head','muted'].forEach(n => colors[n] = cs.getPropertyValue('--' + n).trim());
+  ['wave','played','loop','ab-wave','ab-played','a','b','marker','head','muted'].forEach(n => colors[n] = cs.getPropertyValue('--' + n).trim());
 }
 readColors();
 try{ matchMedia('(prefers-color-scheme: dark)').addEventListener('change', () => { readColors(); drawWave(); }); }catch(e){}
@@ -338,8 +341,12 @@ function drawWave(){
   clampView();
   const sp = span(), t0 = view.start, X = t => (t - t0) / sp * W, cur = now();
 
-  if(song.a != null && song.b != null){
+  const hasAB = song.a != null && song.b != null;
+  if(hasAB){
+    // リピートONなら濃く、OFFなら薄く区間の背景を塗る
+    g.globalAlpha = song.loop ? 1 : 0.5;
     g.fillStyle = colors.loop; g.fillRect(X(song.a), 0, X(song.b) - X(song.a), H);
+    g.globalAlpha = 1;
   }
   if(peaks){
     const d = peaks.data, ps = peaks.perSec, mid = H / 2, amp = H / 2 - 3;
@@ -348,7 +355,9 @@ function drawWave(){
       const i0 = Math.floor(ta * ps), i1 = Math.max(i0 + 1, Math.floor(tb * ps));
       let m = 0; for(let i = i0; i < i1 && i < d.length; i++) if(d[i] > m) m = d[i];
       const h = Math.max(0.5, m * amp);
-      g.fillStyle = ta < cur ? colors.played : colors.wave;
+      const inAB = hasAB && ta >= song.a && ta < song.b;
+      g.fillStyle = inAB ? (ta < cur ? colors['ab-played'] : colors['ab-wave'])
+                         : (ta < cur ? colors.played : colors.wave);
       g.fillRect(px, mid - h, 1, h * 2);
     }
   }
