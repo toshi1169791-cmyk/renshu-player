@@ -235,6 +235,8 @@ let lastUserScroll = 0, lastTime = 0, wakeLock = null, switching = false, lastPo
 
 function blankSong(){ return { markers: [], a: null, b: null, loop: false, rate: 1 }; }
 function save(){ if(key){ song.updated = Date.now(); if(!store.set(key, song)) toast('保存できませんでした（ストレージ不足？）'); } }
+// マーカーを変えた時は、変えた日時も記録（Sound it! 側の変更と、どちらが新しいか比べるため）
+function saveM(){ song.mUpdated = Date.now(); save(); }
 
 /* ---------- helpers ---------- */
 function fmt(t){
@@ -316,7 +318,7 @@ async function importSoundIt(f, k){
   try{
     const ms = await readSoundItMarkers(f);
     if(!ms.length || k !== key || song.markers.length) return;
-    song.markers = ms; save(); renderMarkers(); drawWave();
+    song.markers = ms; song.sitUpdated = f.lastModified || Date.now(); save(); renderMarkers(); drawWave();
     toast(`Sound it! のマーカー ${ms.length}件を取り込みました`);
   }catch(e){}
 }
@@ -618,7 +620,7 @@ function addMarker(){
   if(song.markers.some(m => Math.abs(m.t - t) < 0.15)){ toast('ほぼ同じ位置にマーカーがあります'); return; }
   song.markers.push({ t, label: '' });
   song.markers.sort((x, y) => x.t - y.t);
-  save(); renderMarkers(); drawWave();
+  saveM(); renderMarkers(); drawWave();
   toast(`マーカー ${song.markers.findIndex(m => m.t === t) + 1} を追加（${fmt(t)}）`);
 }
 $('#addM').onclick = addMarker;
@@ -649,7 +651,7 @@ function renderMarkers(){
       const ed = document.createElement('div'); ed.className = 'medit';
       ed.innerHTML = `<input type="text" placeholder="名前（例：サビ）" maxlength="30"><button data-act="here">今の位置へ</button><button class="del" data-act="del">削除</button>`;
       const inp = ed.querySelector('input'); inp.value = m.label || '';
-      inp.onchange = () => { m.label = inp.value.trim(); save(); li.querySelector('.mlabel').textContent = m.label || 'タップで移動'; };
+      inp.onchange = () => { m.label = inp.value.trim(); saveM(); li.querySelector('.mlabel').textContent = m.label || 'タップで移動'; };
       li.appendChild(ed);
     }
     li.onclick = e => {
@@ -659,8 +661,8 @@ function renderMarkers(){
       else if(act === 'a') setPoint('a', m.t);
       else if(act === 'b'){ if(song.a != null && m.t <= song.a){ toast('B点はA点より後にしてください'); return; } setPoint('b', m.t); }
       else if(act === 'edit'){ editIdx = editIdx === i ? -1 : i; renderMarkers(); }
-      else if(act === 'here'){ m.t = now(); song.markers.sort((x, y) => x.t - y.t); editIdx = song.markers.indexOf(m); save(); renderMarkers(); drawWave(); }
-      else if(act === 'del'){ if(confirm(`マーカー ${i + 1}（${fmt(m.t)}${m.label ? ' ' + m.label : ''}）を削除しますか？`)){ song.markers.splice(i, 1); editIdx = -1; save(); renderMarkers(); drawWave(); } }
+      else if(act === 'here'){ m.t = now(); song.markers.sort((x, y) => x.t - y.t); editIdx = song.markers.indexOf(m); saveM(); renderMarkers(); drawWave(); }
+      else if(act === 'del'){ if(confirm(`マーカー ${i + 1}（${fmt(m.t)}${m.label ? ' ' + m.label : ''}）を削除しますか？`)){ song.markers.splice(i, 1); editIdx = -1; saveM(); renderMarkers(); drawWave(); } }
     };
     ul.appendChild(li);
   });
@@ -702,8 +704,20 @@ $('#importIn').onchange = async e => {
       if(!(j.version >= 2)) k = songName(k.replace(/\|\d+$/, ''));   // 旧形式「名前.wav|サイズ」
       k = k.normalize('NFC');
       const exist = store.get(PREFIX + k);
+      if(j.origin === 'soundit'){
+        // 変換スクリプトが作った Sound it! のマーカー：マーカーだけを入れ替え、A-B・速度・再生位置は残す
+        if(!v.markers.length) continue;
+        const sit = v.updated || 1;
+        if(exist && exist.markers.length){
+          if(sit <= (exist.sitUpdated || 0)) continue;   // 前回から Sound it! 側の変更なし
+          // アプリでマーカーを変えた日時（古い版のデータは保存日時で代用）
+          const appEdit = exist.mUpdated != null ? exist.mUpdated : (exist.sitUpdated ? 0 : (exist.updated || 0));
+          if(appEdit >= sit){ skip++; continue; }        // アプリでの変更のほうが新しい
+        }
+        v = Object.assign(exist || blankSong(), { markers: v.markers, sitUpdated: sit });
+      }
       // すでにこの端末にデータがある曲は、より新しく編集されたデータの時だけ上書き
-      if(exist && (exist.markers.length || exist.a != null) && !(v.updated && (!exist.updated || v.updated > exist.updated))){
+      else if(exist &&(exist.markers.length || exist.a != null) && !(v.updated && (!exist.updated || v.updated > exist.updated))){
         // マーカーがまだ無い曲は、A-B・速度・再生位置はそのままにマーカーだけ入れる
         if(!exist.markers.length && v.markers.length) v = Object.assign(exist, { markers: v.markers });
         else { skip++; continue; }
@@ -712,6 +726,7 @@ $('#importIn').onchange = async e => {
       n++;
     }
     toast(`${n}曲分のデータを読み込みました` + (skip ? `（この端末で編集済みの ${skip}曲はそのまま）` : ''));
+    if(!n && !skip) toast('新しく変わったマーカーはありませんでした');
     if(curIdx >= 0){ const keep = now(); loadFile(curIdx); audio.addEventListener('loadedmetadata', () => seek(keep), { once: true }); }
   }catch(err){ toast('読み込めないファイルです'); }
 };
