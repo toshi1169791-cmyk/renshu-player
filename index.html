@@ -703,7 +703,11 @@ $('#importIn').onchange = async e => {
       k = k.normalize('NFC');
       const exist = store.get(PREFIX + k);
       // すでにこの端末にデータがある曲は、より新しく編集されたデータの時だけ上書き
-      if(exist && (exist.markers.length || exist.a != null) && !(v.updated && (!exist.updated || v.updated > exist.updated))){ skip++; continue; }
+      if(exist && (exist.markers.length || exist.a != null) && !(v.updated && (!exist.updated || v.updated > exist.updated))){
+        // マーカーがまだ無い曲は、A-B・速度・再生位置はそのままにマーカーだけ入れる
+        if(!exist.markers.length && v.markers.length) v = Object.assign(exist, { markers: v.markers });
+        else { skip++; continue; }
+      }
       if(!store.set(PREFIX + k, v)){ toast('保存領域がいっぱいで、途中までしか読み込めませんでした'); break; }
       n++;
     }
