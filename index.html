@@ -68,6 +68,10 @@ canvas#wave{display:block;width:100%;height:64px;touch-action:none}
 main{padding:12px 16px 40px;display:grid;gap:12px}
 @media (min-width:760px){ main{grid-template-columns:1fr 1fr;align-items:start} .col{display:grid;gap:12px} }
 .col{display:grid;gap:12px}
+/* PC・タブレット（2列）：マーカー一覧をスクロールしても、A-Bリピートと再生速度は画面に残す */
+@media (min-width:760px) and (min-height:561px){
+  .col.side{position:sticky;top:calc(var(--top-h, 0px) + 12px);max-height:calc(100vh - var(--top-h, 0px) - 24px);overflow-y:auto}
+}
 /* スマホを横向きにした時（画面の高さが低い）：左に波形と再生ボタン、右にマーカー・A-B・速度 */
 @media (orientation:landscape) and (max-height:560px){
   body{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1fr);align-items:start}
@@ -160,7 +164,7 @@ input[type=range]{width:100%;height:40px;accent-color:var(--accent)}
     </section>
   </div>
 
-  <div class="col">
+  <div class="col side">
     <section class="panel">
       <h2>A-B リピート</h2>
       <div class="row">
@@ -499,6 +503,8 @@ function applyHeight(){
 }
 document.querySelectorAll('[data-h]').forEach(b => b.onclick = () => { prefs.height = b.dataset.h; store.set('renshu:prefs', prefs); applyHeight(); });
 new ResizeObserver(() => drawWave()).observe(cv);
+// 上の固定部分（波形・再生ボタン）の高さ：右列をそのすぐ下に固定するために使う
+new ResizeObserver(() => document.documentElement.style.setProperty('--top-h', $('.top').offsetHeight + 'px')).observe($('.top'));
 
 /* ---------- transport ---------- */
 function togglePlay(){
