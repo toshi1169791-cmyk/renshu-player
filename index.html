@@ -124,6 +124,9 @@ input[type=range]{width:100%;height:40px;accent-color:var(--accent)}
 .hint{color:var(--muted);font-size:14px;line-height:1.6;margin:0}
 .toast{position:fixed;left:50%;bottom:24px;transform:translateX(-50%);background:var(--head);color:var(--bg);padding:12px 18px;border-radius:12px;font-weight:600;opacity:0;pointer-events:none;transition:opacity .2s;max-width:calc(100% - 32px);z-index:20}
 .toast.show{opacity:.95}
+#trialStop{position:fixed;inset:0;z-index:100;background:var(--bg);display:grid;place-items:center;padding:24px;text-align:center}
+#trialStop h2{font-size:22px;margin:0 0 8px}
+#trialStop p{color:var(--muted);margin:0}
 .hidden{display:none!important}
 </style>
 </head>
@@ -777,6 +780,37 @@ function renderAll(){
   renderAB(); applyRate(); renderMarkers(); refresh();
 }
 applyHeight(); renderAll();
+
+/* ---------- 試用版だけの停止スイッチ（本番版では何もしない） ----------
+   status.json の active を false にすると使えなくなる。until（例 "2026-12-31"）を過ぎても止まる。
+   最後に確認した状態を端末に覚えておくので、オフラインでも止まったまま。 */
+if(window.RENSHU_TRIAL){
+  const TK = 'renshu:trial';
+  let stopped = false;
+  const apply = s => {
+    if(!s) return;
+    const expired = !!s.until && Date.now() > new Date(s.until + 'T23:59:59').getTime();
+    stopped = s.active === false || expired;
+    let ov = $('#trialStop');
+    if(stopped){
+      audio.pause();
+      if(!ov){
+        ov = document.createElement('div'); ov.id = 'trialStop';
+        ov.innerHTML = '<div><h2>試用期間は終了しました</h2><p></p></div>';
+        document.body.appendChild(ov);
+      }
+      ov.querySelector('p').textContent = s.message || 'ご利用ありがとうございました。';
+    } else if(ov) ov.remove();
+  };
+  const check = () => fetch('status.json?t=' + Date.now(), { cache: 'no-store' })
+    .then(r => r.ok ? r.json() : null)
+    .then(s => { if(s){ store.set(TK, s); apply(s); } })
+    .catch(() => {});
+  apply(store.get(TK));
+  check();
+  document.addEventListener('visibilitychange', () => { if(!document.hidden) check(); });
+  audio.addEventListener('play', () => { if(stopped) audio.pause(); });
+}
 
 if('serviceWorker' in navigator && location.protocol.startsWith('http')){
   navigator.serviceWorker.register('sw.js').catch(() => {});
