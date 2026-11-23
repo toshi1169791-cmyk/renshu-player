@@ -1,6 +1,6 @@
 // オフラインでも起動できるようにアプリ本体をキャッシュする
-const CACHE = 'renshu-player-v12';
-const FILES = ['./', 'index.html', 'manifest.webmanifest', 'icon.svg', 'icon-192.png', 'icon-512.png'];
+const CACHE = 'renshu-player-v13';
+const FILES = ['./', 'index.html', 'guide.html', 'manifest.webmanifest', 'icon.svg', 'icon-192.png', 'icon-512.png'];
 
 self.addEventListener('install', e => {
   e.waitUntil(caches.open(CACHE).then(c => c.addAll(FILES)).then(() => self.skipWaiting()));

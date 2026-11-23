@@ -8,6 +8,10 @@
 <link rel="manifest" href="manifest.webmanifest">
 <link rel="icon" href="icon.svg" type="image/svg+xml">
 <link rel="apple-touch-icon" href="icon-192.png">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-title" content="練習プレイヤー">
+<meta name="apple-mobile-web-app-status-bar-style" content="default">
 <meta name="theme-color" content="#1f2633">
 <style>
 :root{
@@ -39,6 +43,8 @@
 *{box-sizing:border-box}
 html,body{margin:0}
 body{background:var(--bg);color:var(--text);font-family:system-ui,-apple-system,"Hiragino Sans","Noto Sans JP",sans-serif;font-size:17px;-webkit-tap-highlight-color:transparent;overscroll-behavior:none}
+/* iPhone のノッチ・ホームバーに重ならないように */
+body{padding-left:env(safe-area-inset-left);padding-right:env(safe-area-inset-right);padding-bottom:env(safe-area-inset-bottom)}
 button,select,input{font:inherit;color:inherit}
 button{background:var(--btn);border:0;border-radius:12px;min-height:56px;padding:0 14px;cursor:pointer;touch-action:manipulation;user-select:none;font-weight:600}
 button:active{background:var(--btn-press)}
@@ -206,7 +212,7 @@ input[type=range]{width:100%;height:40px;accent-color:var(--accent)}
 
     <section class="panel">
       <h2>データ</h2>
-      <p class="hint">マーカーとA-B区間は「ファイル名（拡張子を除く）」で曲ごとに自動保存されます。wavをm4aに変換しても同じ曲として引き継がれます。Sound it! でマーカーを付けたWAVを開くと、そのマーカーも自動で取り込みます。ブラウザのデータを消すと失われるので、ときどき書き出しておくと安心です。</p>
+      <p class="hint">マーカーとA-B区間は「ファイル名（拡張子を除く）」で曲ごとに自動保存されます。wavをm4aに変換しても同じ曲として引き継がれます。Sound it! でマーカーを付けたWAVを開くと、そのマーカーも自動で取り込みます。データはこの端末の中だけに保存され、ほかの人や端末には送られません。ブラウザのデータを消すと失われるので、ときどき書き出しておくと安心です。<a href="guide.html">使い方</a></p>
       <div class="row" style="margin-top:10px">
         <button class="grow" id="exportBtn">💾 書き出し</button>
         <button class="grow" id="importBtn">📥 読み込み</button>
@@ -372,8 +378,11 @@ async function computePeaks(file, k){
   try{
     const buf = await file.arrayBuffer();
     const Ctx = window.OfflineAudioContext || window.webkitOfflineAudioContext;
-    const ctx = new Ctx(1, 1, 8000);               // 8kHzに変換して省メモリで解析
-    const ab = await ctx.decodeAudioData(buf);
+    let ctx;
+    try{ ctx = new Ctx(1, 1, 8000); }               // 8kHzに変換して省メモリで解析
+    catch(e){ ctx = new Ctx(1, 1, 22050); }        // 古い iPhone は 8kHz を使えないため
+    // 古い Safari はコールバック形式なので両方に対応
+    const ab = await new Promise((res, rej) => { const p = ctx.decodeAudioData(buf, res, rej); if(p && p.then) p.then(res, rej); });
     if(k !== key) return;
     const len = ab.length, step = Math.max(1, Math.floor(ab.sampleRate / PEAKS_PER_SEC));
     const count = Math.ceil(len / step), out = new Float32Array(count);
@@ -700,8 +709,18 @@ $('#exportBtn').onclick = () => {
   const blob = new Blob([JSON.stringify({ app: 'renshu-player', version: 2, songs: data }, null, 1)], { type: 'application/json' });
   const a = document.createElement('a');
   const d = new Date(), pad = x => String(x).padStart(2, '0');
+  const fname = `練習プレイヤー_マーカー_${d.getFullYear()}${pad(d.getMonth() + 1)}${pad(d.getDate())}.json`;
+  // iPhone / iPad は共有シートから「"ファイル"に保存」で保存する（ホーム画面のアプリではダウンロードが使えないため）
+  const isIOS = /iP(hone|ad|od)/.test(navigator.userAgent) || (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1);
+  if(isIOS && navigator.canShare){
+    const file = new File([blob], fname, { type: 'application/json' });
+    if(navigator.canShare({ files: [file] })){
+      navigator.share({ files: [file] }).then(() => toast(`${n}曲分のデータを書き出しました`)).catch(() => {});
+      return;
+    }
+  }
   a.href = URL.createObjectURL(blob);
-  a.download = `練習プレイヤー_マーカー_${d.getFullYear()}${pad(d.getMonth() + 1)}${pad(d.getDate())}.json`;
+  a.download = fname;
   document.body.appendChild(a); a.click(); a.remove();
   setTimeout(() => URL.revokeObjectURL(a.href), 5000);
   toast(`${n}曲分のデータを書き出しました`);
