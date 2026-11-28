@@ -108,6 +108,14 @@ input[type=range]{width:100%;height:40px;accent-color:var(--accent)}
 /* マーカー一覧：枠内スクロールはせず、ページ全体のスクロールに任せる */
 .phead{display:flex;align-items:center;justify-content:space-between;margin-bottom:10px}
 .phead h2{margin:0}
+/* 編集 */
+.sub{font-size:14px;color:var(--muted);margin:14px 0 8px;font-weight:700}
+.fld{font-size:15px;color:var(--muted);display:inline-flex;align-items:center;gap:6px}
+.fld input[type=number],.fld select{min-height:48px;width:96px;border-radius:10px;border:1px solid var(--line);background:var(--panel);padding:0 8px;font-size:18px;color:var(--text)}
+.chk{display:block;font-size:15px;margin:0 0 8px}
+.chk input{width:20px;height:20px;vertical-align:-4px}
+#editMsg:empty{display:none}
+#editMsg{margin-top:8px;font-weight:700;color:var(--text)}
 /* 録音 */
 #recIn{min-height:48px;border-radius:10px;border:1px solid var(--line);background:var(--panel);padding:0 10px;min-width:0}
 button.rec{background:var(--danger);color:#fff;min-height:60px;font-size:19px}
@@ -262,6 +270,41 @@ button.rec.on{animation:recblink 1s steps(2) infinite}
       <ul class="reclist" id="recList"></ul>
     </section>
 
+    <section class="panel" id="editPanel">
+      <h2>✂ 編集（カウント・カット）</h2>
+      <p class="hint">編集すると「曲名_編集」という別の曲になります（元のファイルはそのまま）。試し聴きして良ければ「💾 m4aで保存」。マーカーも一緒にずれます。</p>
+      <h3 class="sub">頭にカウント（クリック）を付ける</h3>
+      <div class="row">
+        <label class="fld">BPM <input id="bpm" type="number" min="30" max="300" step="0.1" inputmode="decimal"></label>
+        <button class="small" id="tapBtn">タップ</button>
+        <button class="small" id="bpmEst">推定</button>
+      </div>
+      <div class="row">
+        <label class="fld">拍子 <select id="beatsPer"><option value="4">4拍子</option><option value="3">3拍子</option><option value="2">2拍子</option><option value="6">6拍子</option></select></label>
+        <label class="fld">小節 <input id="cntBars" type="number" min="1" max="8" value="2" inputmode="numeric"></label>
+      </div>
+      <label class="chk"><input type="checkbox" id="dblCount"> ダブルカウント（1小節目は1拍目・3拍目だけ鳴らす）</label>
+      <div class="row">
+        <button class="grow" id="setBeat1">今の位置を曲の1拍目にする</button>
+        <span class="pt" id="beat1Txt">--:--</span>
+      </div>
+      <div class="row">
+        <button class="small grow" id="b1m">−0.01秒</button>
+        <button class="small grow" id="b1p">+0.01秒</button>
+        <button class="small grow" id="b1go">1拍目から再生</button>
+      </div>
+      <label class="fld" style="display:flex;align-items:center;gap:8px;margin-bottom:8px">クリック音量 <input type="range" id="clkVol" min="5" max="100" value="70" style="flex:1"></label>
+      <button class="primary" id="addCount" style="width:100%">＋ カウントを付ける</button>
+      <h3 class="sub">途中を短くする</h3>
+      <button id="cutAB" style="width:100%">✂ A-B区間をカット</button>
+      <p class="hint">A-Bリピートで決めた範囲を削除します。「先頭」「最後」マーカーと組み合わせると、曲の最初や最後も切れます。</p>
+      <div class="row" style="margin-top:8px">
+        <button class="grow" id="undoEdit">↶ 元に戻す</button>
+        <button class="grow primary" id="saveEdit">💾 m4aで保存</button>
+      </div>
+      <p class="hint" id="editMsg"></p>
+    </section>
+
     <section class="panel">
       <h2>データ</h2>
       <p class="hint">マーカーとA-B区間は「ファイル名（拡張子を除く）」で曲ごとに自動保存されます。wavをm4aに変換しても同じ曲として引き継がれます。Sound it! でマーカーを付けたWAVを開くと、そのマーカーも自動で取り込みます。データはこの端末の中だけに保存され、ほかの人や端末には送られません。ブラウザのデータを消すと失われるので、ときどき書き出しておくと安心です。<a href="guide.html">使い方</a></p>
@@ -328,6 +371,7 @@ $('#openBtn').onclick = () => $('#fileIn').click();
 $('#fileIn').onchange = e => {
   const list = [...e.target.files];
   if(!list.length) return;
+  editUndo.length = 0; editCur = null; editMsg('');   // 別の曲を開いたら、編集のやり直し履歴は消す
   files = list; renderSongSel(); loadFile(0);
   e.target.value = '';
 };
@@ -862,9 +906,299 @@ function refresh(){
 function renderAll(){
   $('#tDur').textContent = fmt(dur());
   $('#zoomLbl').textContent = '×' + view.zoom;
-  renderAB(); applyRate(); renderMarkers(); refresh();
+  renderAB(); applyRate(); renderMarkers(); renderEdit(); refresh();
 }
 applyHeight(); renderAll();
+
+/* ---------- 編集（頭にカウント・途中をカット） ----------
+   曲全体を読み込んで編集し、「曲名_編集」という別の曲として開き直す。元のファイルは変えない。
+   保存は m4a（AAC。Chrome などで対応している場合）、対応していない端末では WAV。 */
+// クリック音：I:\Lesson\00.Song\00.J-pop\春泥棒(ヨルシカ)\click_125.wav から取り出した音（44.1kHz・16bit）
+const CLICK = { sr: 44100, pre: 22, accent: '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', normal: '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' };
+const clickCache = {};
+function clickPCM(name, sr){
+  const k = name + sr; if(clickCache[k]) return clickCache[k];
+  const bin = atob(CLICK[name]), n = bin.length / 2, src = new Float32Array(n);
+  for(let i = 0; i < n; i++){ let v = bin.charCodeAt(2 * i) | (bin.charCodeAt(2 * i + 1) << 8); if(v >= 32768) v -= 65536; src[i] = v / 32768; }
+  if(sr === CLICK.sr) return (clickCache[k] = src);
+  const m = Math.round(n * sr / CLICK.sr), out = new Float32Array(m);      // サンプリング周波数が違う曲は合わせる
+  for(let i = 0; i < m; i++){ const x = i * CLICK.sr / sr, j = Math.floor(x), f = x - j; out[i] = (src[j] || 0) * (1 - f) + (src[j + 1] || 0) * f; }
+  return (clickCache[k] = out);
+}
+
+var editCur = null;      // 編集中の曲 { key, sr, ch:[Float32Array…] }
+const editUndo = [];     // 元に戻す用
+const EDIT_SUFFIX = '_編集';
+function editMsg(s){ $('#editMsg').textContent = s || ''; }
+
+function wavSampleRate(ab){
+  const dv = new DataView(ab), tag = o => String.fromCharCode(dv.getUint8(o), dv.getUint8(o + 1), dv.getUint8(o + 2), dv.getUint8(o + 3));
+  if(dv.byteLength < 12 || tag(0) !== 'RIFF') return 0;
+  for(let p = 12; p + 8 <= dv.byteLength && p < 1 << 20; ){
+    const size = dv.getUint32(p + 4, true);
+    if(tag(p) === 'fmt ') return dv.getUint32(p + 12, true);
+    p += 8 + size + (size & 1);
+  }
+  return 0;
+}
+// 今の曲を、元のサンプリング周波数のまま全部読み込む
+async function loadWork(){
+  if(editCur && editCur.key === key) return editCur;
+  const f = files[curIdx];
+  editMsg('曲を読み込んでいます…');
+  const ab = await f.arrayBuffer();
+  const sr = wavSampleRate(ab) || 44100;
+  const Ctx = window.OfflineAudioContext || window.webkitOfflineAudioContext;
+  const ctx = new Ctx(2, 1, sr);
+  const buf = await new Promise((res, rej) => { const p = ctx.decodeAudioData(ab, res, rej); if(p && p.then) p.then(res, rej); });
+  const ch = []; for(let c = 0; c < Math.min(2, buf.numberOfChannels); c++) ch.push(buf.getChannelData(c));
+  editMsg('');
+  return { key, sr: buf.sampleRate, ch };
+}
+function encodeWAV(ch, sr){
+  const nc = ch.length, n = ch[0].length, buf = new ArrayBuffer(44 + n * nc * 2), dv = new DataView(buf);
+  const w = (o, s) => { for(let i = 0; i < s.length; i++) dv.setUint8(o + i, s.charCodeAt(i)); };
+  w(0, 'RIFF'); dv.setUint32(4, 36 + n * nc * 2, true); w(8, 'WAVE'); w(12, 'fmt '); dv.setUint32(16, 16, true);
+  dv.setUint16(20, 1, true); dv.setUint16(22, nc, true); dv.setUint32(24, sr, true); dv.setUint32(28, sr * nc * 2, true);
+  dv.setUint16(32, nc * 2, true); dv.setUint16(34, 16, true); w(36, 'data'); dv.setUint32(40, n * nc * 2, true);
+  const out = new Int16Array(buf, 44);
+  for(let i = 0, o = 0; i < n; i++) for(let c = 0; c < nc; c++){ const v = Math.max(-1, Math.min(1, ch[c][i])); out[o++] = v < 0 ? v * 32768 : v * 32767; }
+  return new Blob([buf], { type: 'audio/wav' });
+}
+// 編集結果を「曲名_編集」として開き直す。データ（マーカー等）は fixData で作り直す
+function applyEdit(ch, sr, fixData, msg){
+  const cur = files[curIdx], base = songName(cur.name), name = base.endsWith(EDIT_SUFFIX) ? base : base + EDIT_SUFFIX;
+  const wk = PREFIX + name.normalize('NFC');
+  savePos();
+  editUndo.push({ files: files.slice(), idx: curIdx, data: store.get(wk), work: editCur });
+  if(editUndo.length > 8) editUndo.shift();
+  const nd = fixData(JSON.parse(JSON.stringify(song)));
+  nd.updated = nd.mUpdated = Date.now(); nd.pos = 0; delete nd.sitUpdated;
+  store.set(wk, nd);
+  const file = new File([encodeWAV(ch, sr)], name + '.wav', { type: 'audio/wav' });
+  editCur = { key: wk, sr, ch };
+  let idx = files.findIndex(f => songKey(f.name) === wk);
+  if(idx < 0){ files.push(file); idx = files.length - 1; } else files[idx] = file;
+  key = null;                 // 切り替え時に古いデータで上書きしないように
+  curIdx = -1;
+  renderSongSel(); loadFile(idx);
+  editMsg(msg + '（編集中：' + name + '）');
+}
+const shiftT = (t, f) => (t == null ? null : f(t));
+
+/* 頭にカウントを付ける */
+async function addCountIn(){
+  if(needSong()) return;
+  const bpm = parseFloat($('#bpm').value), bpb = +$('#beatsPer').value, bars = Math.max(1, Math.min(8, parseInt($('#cntBars').value) || 1));
+  const dbl = $('#dblCount').checked, vol = $('#clkVol').value / 100;
+  if(!(bpm >= 30 && bpm <= 300)){ toast('BPMを入れてください（タップや推定でも入ります）'); return; }
+  if(song.beat1 == null){ toast('先に「今の位置を曲の1拍目にする」で1拍目を決めてください'); return; }
+  let w; try{ w = await loadWork(); }catch(e){ editMsg(''); toast('この曲は編集用に読み込めませんでした'); return; }
+  const sr = w.sr, beat = 60 / bpm, countLen = bars * bpb * beat, PRE = 0.5;
+  const startT = song.beat1 - countLen - PRE;               // 元の曲のこの時刻が、新しい曲の0秒になる
+  const pad = Math.max(0, Math.round(-startT * sr)), from = Math.max(0, Math.round(startT * sr));
+  const len = pad + w.ch[0].length - from;
+  const ch = w.ch.map(c => { const o = new Float32Array(len); o.set(c.subarray(from), pad); return o; });
+  const acc = clickPCM('accent', sr), nor = clickPCM('normal', sr), pre = Math.round(CLICK.pre * sr / CLICK.sr);
+  for(let bar = 0; bar < bars; bar++) for(let b = 0; b < bpb; b++){
+    if(dbl && bar === 0 && b % 2) continue;                 // ダブルカウント：1小節目は1拍目・3拍目…だけ
+    const t = song.beat1 - countLen + (bar * bpb + b) * beat - startT;
+    const s = b === 0 ? acc : nor, p0 = Math.round(t * sr) - pre;
+    for(const o of ch) for(let k = 0; k < s.length; k++){ const i = p0 + k; if(i >= 0 && i < len) o[i] = Math.max(-1, Math.min(1, o[i] + s[k] * vol)); }
+  }
+  const mv = t => t - startT;
+  applyEdit(ch, sr, d => {
+    d.markers = d.markers.map(m => ({ t: mv(m.t), label: m.label })).filter(m => m.t >= 0);
+    const b1 = mv(d.beat1);
+    if(!d.markers.some(m => Math.abs(m.t - b1) < 0.15)) d.markers.push({ t: b1, label: '1拍目' });
+    d.markers.push({ t: PRE, label: 'カウント' });
+    d.markers.sort((x, y) => x.t - y.t);
+    d.a = shiftT(d.a, mv); d.b = shiftT(d.b, mv); d.startT = shiftT(d.startT, mv);
+    if(d.a != null && d.a < 0) d.a = null; if(d.b != null && d.b <= 0){ d.b = null; d.loop = false; }
+    d.beat1 = b1; d.bpm = bpm;
+    return d;
+  }, `カウント（${bars}小節${dbl ? '・ダブル' : ''}・BPM ${bpm}）を付けました`);
+}
+
+/* A-B区間をカット */
+async function cutAB(){
+  if(needSong()) return;
+  if(song.a == null || song.b == null || song.b <= song.a){ toast('先にA点とB点でカットする範囲を決めてください'); return; }
+  let w; try{ w = await loadWork(); }catch(e){ editMsg(''); toast('この曲は編集用に読み込めませんでした'); return; }
+  const sr = w.sr, a = song.a, b = song.b, N = w.ch[0].length;
+  const s = Math.max(0, Math.min(N, Math.round(a * sr))), e = Math.max(s, Math.min(N, Math.round(b * sr)));
+  const fade = Math.min(Math.round(0.01 * sr), s, N - e, e - s);   // つなぎ目は10msで滑らかに
+  const len = N - (e - s);
+  const ch = w.ch.map(c => {
+    const o = new Float32Array(len);
+    o.set(c.subarray(0, s)); o.set(c.subarray(e), s);
+    for(let k = 0; k < fade; k++){ const x = k / fade; o[s - fade + k] = c[s - fade + k] * (1 - x) + c[e - fade + k] * x; }
+    return o;
+  });
+  const cut = (e - s) / sr;
+  const mv = t => (t < a ? t : t >= b ? t - cut : null);
+  applyEdit(ch, sr, d => {
+    d.markers = d.markers.map(m => ({ t: mv(m.t), label: m.label })).filter(m => m.t != null);
+    d.a = d.b = null; d.loop = false;
+    d.startT = d.startT == null ? null : mv(d.startT);
+    d.beat1 = d.beat1 == null ? null : mv(d.beat1);
+    return d;
+  }, `${fmt(a)}〜${fmt(b)}（${cut.toFixed(1)}秒）をカットしました`);
+}
+
+function undoEdit(){
+  const u = editUndo.pop();
+  if(!u){ toast('元に戻せる編集はありません'); return; }
+  const wk = editCur ? editCur.key : null;
+  if(wk){ if(u.data) store.set(wk, u.data); else { try{ localStorage.removeItem(wk); }catch(e){} } }
+  files = u.files; editCur = u.work;
+  key = null; curIdx = -1;
+  renderSongSel(); loadFile(Math.min(u.idx, files.length - 1));
+  editMsg(editUndo.length ? '1つ前に戻しました' : '編集前に戻しました');
+}
+
+/* m4a（AAC）で保存。ブラウザが AAC に対応していなければ WAV で保存 */
+async function encodeM4A(w){
+  if(typeof AudioEncoder === 'undefined' || typeof AudioData === 'undefined') throw new Error('no-encoder');
+  const nc = w.ch.length, sr = w.sr, cfg = { codec: 'mp4a.40.2', sampleRate: sr, numberOfChannels: nc, bitrate: 256000 };
+  const sup = await AudioEncoder.isConfigSupported(cfg);
+  if(!sup.supported) throw new Error('no-aac');
+  const frames = []; let asc = null, err = null;
+  const enc = new AudioEncoder({
+    output: (c, meta) => {
+      const b = new Uint8Array(c.byteLength); c.copyTo(b); frames.push(b);
+      const d = meta && meta.decoderConfig && meta.decoderConfig.description;
+      if(d && !asc) asc = d instanceof ArrayBuffer ? new Uint8Array(d.slice(0)) : new Uint8Array(d.buffer.slice(d.byteOffset, d.byteOffset + d.byteLength));
+    },
+    error: e => { err = e; }
+  });
+  enc.configure(cfg);
+  const N = w.ch[0].length, B = 8192;
+  for(let i = 0; i < N; i += B){
+    const n = Math.min(B, N - i), data = new Float32Array(n * nc);
+    for(let c = 0; c < nc; c++) data.set(w.ch[c].subarray(i, i + n), c * n);
+    enc.encode(new AudioData({ format: 'f32-planar', sampleRate: sr, numberOfFrames: n, numberOfChannels: nc, timestamp: Math.round(i / sr * 1e6), data }));
+    if(enc.encodeQueueSize > 20) await new Promise(r => setTimeout(r, 0));
+    if(i % (B * 40) === 0) editMsg(`m4aに変換中… ${Math.round(i / N * 100)}%`);
+  }
+  await enc.flush(); enc.close();
+  if(err) throw err;
+  if(!asc){   // AudioSpecificConfig（AAC-LC）を自分で作る
+    const fi = [96000, 88200, 64000, 48000, 44100, 32000, 24000, 22050, 16000, 12000, 11025, 8000].indexOf(sr);
+    asc = new Uint8Array([(2 << 3) | (fi >> 1), ((fi & 1) << 7) | (nc << 3)]);
+  }
+  return mp4Mux(frames, sr, nc, asc);
+}
+// AAC のフレームを m4a（MP4）ファイルにまとめる
+function mp4Mux(frames, sr, nc, asc){
+  const enc = new TextEncoder();
+  const u32 = v => [(v >>> 24) & 255, (v >>> 16) & 255, (v >>> 8) & 255, v & 255], u16 = v => [(v >>> 8) & 255, v & 255];
+  const box = (type, ...parts) => {
+    const body = []; parts.forEach(p => { for(const x of p) body.push(x); });
+    return [...u32(8 + body.length), ...enc.encode(type), ...body];
+  };
+  const full = (type, ver, flags, ...parts) => box(type, [ver, (flags >> 16) & 255, (flags >> 8) & 255, flags & 255], ...parts);
+  const zeros = n => new Array(n).fill(0);
+  const matrix = [...u32(0x10000), ...u32(0), ...u32(0), ...u32(0), ...u32(0x10000), ...u32(0), ...u32(0), ...u32(0), ...u32(0x40000000)];
+  const n = frames.length, dur = n * 1024;
+  const desc = (tag, body) => [tag, 0x80, 0x80, 0x80, body.length, ...body];
+  const esds = full('esds', 0, 0, desc(3, [...u16(1), 0, ...desc(4, [0x40, 0x15, 0, 0, 0, ...u32(256000), ...u32(256000), ...desc(5, [...asc])]), ...desc(6, [2])]));
+  const mp4a = box('mp4a', zeros(6), u16(1), zeros(8), u16(nc), u16(16), zeros(4), u32(sr * 65536), esds);
+  const sizes = []; frames.forEach(f => sizes.push(...u32(f.length)));
+  const build = off => {
+    const stbl = box('stbl',
+      full('stsd', 0, 0, u32(1), mp4a),
+      full('stts', 0, 0, u32(1), u32(n), u32(1024)),
+      full('stsc', 0, 0, u32(1), u32(1), u32(n), u32(1)),
+      full('stsz', 0, 0, u32(0), u32(n), sizes),
+      full('stco', 0, 0, u32(1), u32(off)));
+    const minf = box('minf', full('smhd', 0, 0, zeros(4)), box('dinf', full('dref', 0, 0, u32(1), full('url ', 0, 1))), stbl);
+    const mdia = box('mdia', full('mdhd', 0, 0, u32(0), u32(0), u32(sr), u32(dur), u16(0x55c4), u16(0)),
+      full('hdlr', 0, 0, u32(0), enc.encode('soun'), zeros(12), enc.encode('SoundHandler'), [0]), minf);
+    const trak = box('trak', full('tkhd', 0, 3, u32(0), u32(0), u32(1), u32(0), u32(dur), zeros(8), u16(0), u16(0), u16(0x0100), u16(0), matrix, u32(0), u32(0)), mdia);
+    const mvhd = full('mvhd', 0, 0, u32(0), u32(0), u32(sr), u32(dur), u32(0x10000), u16(0x0100), zeros(10), matrix, zeros(24), u32(2));
+    return box('moov', mvhd, trak);
+  };
+  const ftyp = box('ftyp', enc.encode('M4A '), u32(0), enc.encode('M4A '), enc.encode('mp42'), enc.encode('isom'));
+  const moovLen = build(0).length;
+  const total = frames.reduce((s, f) => s + f.length, 0);
+  const moov = build(ftyp.length + moovLen + 8);
+  return new Blob([new Uint8Array(ftyp), new Uint8Array(moov), new Uint8Array(u32(8 + total)), new Uint8Array(enc.encode('mdat')), ...frames], { type: 'audio/mp4' });
+}
+function saveBlob(blob, fname){
+  const isIOS = /iP(hone|ad|od)/.test(navigator.userAgent) || (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1);
+  if(isIOS && navigator.canShare){
+    const f = new File([blob], fname, { type: blob.type });
+    if(navigator.canShare({ files: [f] })){ navigator.share({ files: [f] }).catch(() => {}); return; }
+  }
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(blob); a.download = fname;
+  document.body.appendChild(a); a.click(); a.remove();
+  setTimeout(() => URL.revokeObjectURL(a.href), 10000);
+}
+async function saveEdited(){
+  if(needSong()) return;
+  if(!editCur || editCur.key !== key){ toast('保存できるのは編集した曲（曲名_編集）です'); return; }
+  const name = songName(files[curIdx].name);
+  $('#saveEdit').disabled = true;
+  try{
+    const blob = await encodeM4A(editCur);
+    saveBlob(blob, name + '.m4a');
+    editMsg(`「${name}.m4a」を保存しました。Googleドライブに上げると、マーカーもそのまま使えます。`);
+  }catch(e){
+    saveBlob(encodeWAV(editCur.ch, editCur.sr), name + '.wav');
+    editMsg(`このブラウザは m4a で保存できないため、「${name}.wav」で保存しました（パソコンの Chrome なら m4a で保存できます）。`);
+  }finally{ $('#saveEdit').disabled = false; }
+}
+
+/* BPM：タップ・推定 */
+let taps = [];
+$('#tapBtn').onclick = () => {
+  const t = performance.now();
+  if(taps.length && t - taps[taps.length - 1] > 2000) taps = [];
+  taps.push(t); if(taps.length > 9) taps.shift();
+  if(taps.length >= 3){
+    const bpm = 60000 / ((taps[taps.length - 1] - taps[0]) / (taps.length - 1));
+    $('#bpm').value = bpm.toFixed(1); saveBpm();
+  }
+  $('#tapBtn').textContent = 'タップ（' + taps.length + '）';
+  clearTimeout($('#tapBtn')._t); $('#tapBtn')._t = setTimeout(() => $('#tapBtn').textContent = 'タップ', 2200);
+};
+function estimateBpm(){
+  if(!peaks){ toast('波形の解析が終わってから押してください'); return; }
+  // 音の立ち上がりの強さ → 自己相関。1拍だけでなく2〜8拍先も一緒に見て、テンポを細かく求める
+  const d = peaks.data, ps = peaks.perSec, N = Math.min(d.length, Math.round(ps * 150)), on = new Float32Array(N);
+  for(let i = 1; i < N; i++) on[i] = Math.max(0, d[i] - d[i - 1]);
+  const maxL = Math.round(ps * 60 / 60 * 8) + 2, ac = new Float32Array(maxL + 1);
+  for(let L = Math.round(ps * 60 / 200); L <= maxL; L++){ let s = 0; for(let i = 0; i + L < N; i++) s += on[i] * on[i + L]; ac[L] = s / (N - L); }
+  const at = x => { const j = Math.floor(x), f = x - j; return j + 1 <= maxL ? ac[j] * (1 - f) + ac[j + 1] * f : 0; };
+  let best = -1, bpm = 120;
+  for(let t = 60; t <= 200; t += 0.05){
+    const L = ps * 60 / t; let s = 0;
+    for(let k = 1; k <= 8; k++) s += at(L * k);
+    if(s > best){ best = s; bpm = t; }
+  }
+  while(bpm < 80) bpm *= 2; while(bpm > 180) bpm /= 2;
+  $('#bpm').value = bpm.toFixed(1); saveBpm();
+  toast(`推定 BPM ${bpm.toFixed(1)}（目安です。試し聴きで確かめてください）`);
+}
+$('#bpmEst').onclick = estimateBpm;
+function saveBpm(){ if(!key) return; const v = parseFloat($('#bpm').value); song.bpm = v >= 30 && v <= 300 ? v : null; save(); }
+$('#bpm').onchange = saveBpm;
+function renderEdit(){
+  $('#bpm').value = song.bpm || '';
+  $('#beat1Txt').textContent = song.beat1 == null ? '--:--' : fmt3(song.beat1);
+}
+function fmt3(t){ const m = Math.floor(t / 60), s = t - m * 60; return m + ':' + (s < 10 ? '0' : '') + s.toFixed(2); }
+function setBeat1(t){ if(needSong()) return; song.beat1 = Math.max(0, Math.min(dur() || t, t)); save(); renderEdit(); }
+$('#setBeat1').onclick = () => setBeat1(now());
+$('#b1m').onclick = () => song.beat1 != null && setBeat1(song.beat1 - 0.01);
+$('#b1p').onclick = () => song.beat1 != null && setBeat1(song.beat1 + 0.01);
+$('#b1go').onclick = () => { if(song.beat1 == null){ toast('1拍目がまだ決まっていません'); return; } seek(song.beat1); if(audio.paused) togglePlay(); };
+$('#addCount').onclick = addCountIn;
+$('#cutAB').onclick = cutAB;
+$('#undoEdit').onclick = undoEdit;
+$('#saveEdit').onclick = saveEdited;
 
 /* ---------- 録音 ----------
    入力（Sound Blaster などのオーディオインターフェースや内蔵マイク）を選んで録音する。
