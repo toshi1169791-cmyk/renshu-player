@@ -108,6 +108,24 @@ input[type=range]{width:100%;height:40px;accent-color:var(--accent)}
 /* マーカー一覧：枠内スクロールはせず、ページ全体のスクロールに任せる */
 .phead{display:flex;align-items:center;justify-content:space-between;margin-bottom:10px}
 .phead h2{margin:0}
+/* 録音 */
+#recIn{min-height:48px;border-radius:10px;border:1px solid var(--line);background:var(--panel);padding:0 10px;min-width:0}
+button.rec{background:var(--danger);color:#fff;min-height:60px;font-size:19px}
+button.rec.on{animation:recblink 1s steps(2) infinite}
+@keyframes recblink{50%{opacity:.6}}
+.meter{height:14px;border-radius:7px;background:var(--btn);overflow:hidden;margin:2px 0 8px}
+.meter div{height:100%;width:0;background:var(--on);transition:width .05s linear}
+.meter div.clip{background:var(--danger)}
+.recopts{justify-content:space-between;font-size:15px;color:var(--muted)}
+.recopts input{width:20px;height:20px;vertical-align:-4px}
+.rectime{font-variant-numeric:tabular-nums;font-weight:800;color:var(--danger)}
+.reclist{list-style:none;margin:6px 0 0;padding:0;display:grid;gap:6px}
+.recrow{display:grid;grid-template-columns:48px 1fr 48px 48px;gap:6px;align-items:center;border:1px solid var(--line);border-radius:12px;padding:4px}
+.recrow button{min-height:48px;padding:0}
+.recrow .rname{min-width:0;line-height:1.25}
+.recrow .rname b{display:block;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.recrow .rname small{color:var(--muted);font-size:13px}
+.recrow.playing{border-color:var(--accent);box-shadow:inset 4px 0 0 var(--accent)}
 .mlist{list-style:none;margin:8px 0 0;padding:0;display:grid;gap:6px}
 .mlist.closed{display:none}
 .mrow{display:grid;grid-template-columns:1fr 48px 48px 48px;gap:6px;align-items:stretch;border:1px solid var(--line);border-radius:12px;padding:4px}
@@ -224,6 +242,24 @@ input[type=range]{width:100%;height:40px;accent-color:var(--accent)}
         <button class="small" data-r="90">90%</button>
         <button class="small" data-r="100">100%</button>
       </div>
+    </section>
+
+    <section class="panel" id="recPanel">
+      <h2>🎙 録音</h2>
+      <div class="row">
+        <select id="recIn" class="grow" aria-label="録音する入力"></select>
+        <button class="small" id="recRefresh" aria-label="入力の一覧を更新">🔄</button>
+      </div>
+      <div class="row">
+        <button class="grow rec" id="recBtn">● 録音開始</button>
+        <button class="small" id="recTest">入力チェック</button>
+      </div>
+      <div class="meter" aria-hidden="true"><div id="recLevel"></div></div>
+      <div class="row recopts">
+        <label><input type="checkbox" id="recWithSong" checked> 録音と同時に曲も再生</label>
+        <span id="recTime" class="rectime"></span>
+      </div>
+      <ul class="reclist" id="recList"></ul>
     </section>
 
     <section class="panel">
@@ -360,7 +396,7 @@ async function importSoundIt(f, k){
 
 function loadFile(i){
   const f = files[i]; if(!f) return;
-  if(i !== curIdx) savePos();          // 切り替え前の曲の位置を保存
+  if(i !== curIdx){ savePos(); if(recorder) stopRec(); stopRecPlay(); }   // 切り替え前の曲の位置を保存・録音中なら止めて保存
   switching = true;
   audio.pause();
   if(audio.src) URL.revokeObjectURL(audio.src);
@@ -382,6 +418,7 @@ function loadFile(i){
   }, { once: true });
   updateTitle();
   renderAll();
+  renderRecs();
   computePeaks(f, key);
   if(!song.markers.length) importSoundIt(f, key);
 }
@@ -828,6 +865,192 @@ function renderAll(){
   renderAB(); applyRate(); renderMarkers(); refresh();
 }
 applyHeight(); renderAll();
+
+/* ---------- 録音 ----------
+   入力（Sound Blaster などのオーディオインターフェースや内蔵マイク）を選んで録音する。
+   録音は端末の中（IndexedDB）に曲ごとに保存。データの書き出し（JSON）には含まれない。 */
+const recDB = (() => { let p; return () => p || (p = new Promise((res, rej) => {
+  const r = indexedDB.open('renshu-rec', 1);
+  r.onupgradeneeded = () => r.result.createObjectStore('recs', { keyPath: 'id' }).createIndex('song', 'song');
+  r.onsuccess = () => res(r.result); r.onerror = () => rej(r.error);
+})); })();
+const idbReq = r => new Promise((res, rej) => { r.onsuccess = () => res(r.result); r.onerror = () => rej(r.error); });
+const recStore = async mode => (await recDB()).transaction('recs', mode).objectStore('recs');
+const recGetAll = async k => (await idbReq((await recStore('readonly')).index('song').getAll(k))).sort((a, b) => b.created - a.created);
+const recPut = async r => idbReq((await recStore('readwrite')).put(r));
+const recDelete = async id => idbReq((await recStore('readwrite')).delete(id));
+
+let recStream = null, recorder = null, recChunks = [], recStartAt = 0, recStartPos = 0, recSong = null, recFile = '', recTimer = 0;
+let meterCtx = null, meterRaf = 0, recPlayer = null, recPlayingId = null;
+const canRecord = !!(navigator.mediaDevices && navigator.mediaDevices.getUserMedia && window.MediaRecorder);
+
+// 入力の一覧（名前はマイクを一度許可すると表示される）
+async function listInputs(){
+  const sel = $('#recIn');
+  if(!canRecord){ sel.innerHTML = ''; sel.add(new Option('この端末・ブラウザでは録音できません', '')); return; }
+  let ds = [];
+  try{ ds = (await navigator.mediaDevices.enumerateDevices()).filter(d => d.kind === 'audioinput'); }catch(e){}
+  sel.innerHTML = '';
+  if(!ds.length || ds.every(d => !d.label)) sel.add(new Option('標準の入力（🔄 を押すと一覧が出ます）', ''));
+  else ds.forEach((d, i) => sel.add(new Option(d.label || `入力 ${i + 1}`, d.deviceId)));
+  if(prefs.recIn && [...sel.options].some(o => o.value === prefs.recIn)) sel.value = prefs.recIn;
+}
+async function openInput(){
+  if(recStream) return recStream;
+  const id = $('#recIn').value;
+  // ドラムの音が崩れないよう、通話用の自動調整（音量・雑音・エコー）は切る
+  const c = { echoCancellation: false, noiseSuppression: false, autoGainControl: false, channelCount: { ideal: 2 } };
+  if(id) c.deviceId = { exact: id };
+  recStream = await navigator.mediaDevices.getUserMedia({ audio: c });
+  const used = recStream.getAudioTracks()[0].getSettings().deviceId;
+  await listInputs();
+  if(used && [...$('#recIn').options].some(o => o.value === used)) $('#recIn').value = used;
+  startMeter(recStream);
+  $('#recTest').classList.add('on');
+  return recStream;
+}
+function closeInput(){
+  if(recStream){ recStream.getTracks().forEach(t => t.stop()); recStream = null; }
+  stopMeter(); $('#recTest').classList.remove('on');
+}
+// 入力レベル（赤くなったら音割れ。入力の音量を下げるか、マイクを離す）
+function startMeter(stream){
+  stopMeter();
+  try{
+    const AC = window.AudioContext || window.webkitAudioContext;
+    meterCtx = new AC();
+    const an = meterCtx.createAnalyser(); an.fftSize = 1024;
+    meterCtx.createMediaStreamSource(stream).connect(an);
+    const buf = new Float32Array(an.fftSize), el = $('#recLevel'); let clipAt = 0;
+    const loop = () => {
+      an.getFloatTimeDomainData(buf);
+      let pk = 0; for(let i = 0; i < buf.length; i++){ const a = Math.abs(buf[i]); if(a > pk) pk = a; }
+      if(pk >= 0.98) clipAt = Date.now();
+      el.style.width = Math.min(100, Math.sqrt(pk) * 100) + '%';
+      el.classList.toggle('clip', Date.now() - clipAt < 1000);
+      meterRaf = requestAnimationFrame(loop);
+    };
+    loop();
+  }catch(e){}
+}
+function stopMeter(){
+  cancelAnimationFrame(meterRaf);
+  if(meterCtx){ meterCtx.close().catch(() => {}); meterCtx = null; }
+  const el = $('#recLevel'); el.style.width = '0'; el.classList.remove('clip');
+}
+const recMime = () => ['audio/webm;codecs=opus', 'audio/mp4', 'audio/webm', 'audio/ogg'].find(t => MediaRecorder.isTypeSupported && MediaRecorder.isTypeSupported(t)) || '';
+
+async function startRec(){
+  if(needSong()) return;
+  if(!canRecord){ toast('この端末・ブラウザでは録音できません'); return; }
+  try{ await openInput(); }catch(e){ toast('入力を開けませんでした（接続とマイクの許可を確認してください）'); closeInput(); return; }
+  stopRecPlay();
+  recChunks = [];
+  const mt = recMime();
+  try{ recorder = new MediaRecorder(recStream, mt ? { mimeType: mt, audioBitsPerSecond: 192000 } : undefined); }
+  catch(e){ recorder = new MediaRecorder(recStream); }
+  recorder.ondataavailable = e => { if(e.data && e.data.size) recChunks.push(e.data); };
+  recorder.onstop = saveRec;
+  recSong = key; recFile = files[curIdx].name; recStartPos = now(); recStartAt = Date.now();
+  recorder.start(1000);
+  if($('#recWithSong').checked && audio.paused) audio.play().catch(() => {});
+  keepAwake(true);
+  $('#recBtn').textContent = '■ 録音停止'; $('#recBtn').classList.add('on');
+  recTimer = setInterval(() => $('#recTime').textContent = '● ' + fmt((Date.now() - recStartAt) / 1000), 250);
+}
+function stopRec(){
+  if(!recorder || recorder.state === 'inactive') return;
+  if($('#recWithSong').checked) audio.pause();
+  recorder.stop();
+  clearInterval(recTimer); $('#recTime').textContent = '';
+  $('#recBtn').textContent = '● 録音開始'; $('#recBtn').classList.remove('on');
+}
+async function saveRec(){
+  const r = recorder; recorder = null;
+  const type = (r && r.mimeType) || (recChunks[0] && recChunks[0].type) || 'audio/webm';
+  const blob = new Blob(recChunks, { type }); recChunks = [];
+  closeInput();
+  const sec = (Date.now() - recStartAt) / 1000;
+  if(blob.size < 1000){ toast('録音できませんでした'); return; }
+  try{
+    await recPut({ id: recStartAt + '-' + Math.random().toString(36).slice(2, 7), song: recSong, file: recFile, created: recStartAt, pos: recStartPos, dur: sec, type, blob });
+    toast(`録音を保存しました（${fmt(sec)}）`);
+  }catch(e){ toast('録音を保存できませんでした（端末の空き容量を確認してください）'); }
+  renderRecs();
+}
+function recTitle(r){
+  const d = new Date(r.created), pad = x => String(x).padStart(2, '0');
+  return `${d.getMonth() + 1}/${d.getDate()} ${pad(d.getHours())}:${pad(d.getMinutes())} の録音`;
+}
+async function renderRecs(){
+  const ul = $('#recList');
+  if(!key){ ul.innerHTML = '<li class="empty">曲を開くと、その曲の録音がここに並びます</li>'; return; }
+  let list = [];
+  try{ list = await recGetAll(key); }catch(e){}
+  ul.innerHTML = '';
+  if(!list.length){ ul.innerHTML = '<li class="empty">まだ録音はありません</li>'; return; }
+  list.forEach(r => {
+    const li = document.createElement('li'); li.className = 'recrow' + (recPlayingId === r.id ? ' playing' : '');
+    li.innerHTML = `<button data-act="play" aria-label="再生">${recPlayingId === r.id ? '■' : '▶'}</button><div class="rname"><b></b><small></small></div><button data-act="save" aria-label="ファイルに書き出し">💾</button><button data-act="del" aria-label="削除">🗑</button>`;
+    li.querySelector('b').textContent = recTitle(r);
+    li.querySelector('small').textContent = `長さ ${fmt(r.dur)}・曲の ${fmt(r.pos)} から`;
+    li.onclick = e => {
+      const b = e.target.closest('[data-act]'); if(!b) return;
+      if(b.dataset.act === 'play') playRec(r);
+      else if(b.dataset.act === 'save') exportRec(r);
+      else if(b.dataset.act === 'del' && confirm(`「${recTitle(r)}」を削除しますか？（元に戻せません）`)){
+        if(recPlayingId === r.id) stopRecPlay();
+        recDelete(r.id).then(renderRecs);
+      }
+    };
+    ul.appendChild(li);
+  });
+}
+function playRec(r){
+  if(recPlayingId === r.id){ stopRecPlay(); return; }
+  stopRecPlay(); audio.pause();
+  recPlayer = new Audio(URL.createObjectURL(r.blob)); recPlayingId = r.id;
+  recPlayer.onended = stopRecPlay;
+  recPlayer.play().catch(() => { toast('この録音は再生できませんでした'); stopRecPlay(); });
+  renderRecs();
+}
+function stopRecPlay(){
+  if(recPlayer){ recPlayer.pause(); URL.revokeObjectURL(recPlayer.src); recPlayer = null; }
+  if(recPlayingId){ recPlayingId = null; renderRecs(); }
+}
+function exportRec(r){
+  const d = new Date(r.created), pad = x => String(x).padStart(2, '0');
+  const ext = /mp4|aac/.test(r.type) ? 'm4a' : /ogg/.test(r.type) ? 'ogg' : 'webm';
+  const fname = `${songName(r.file)}_録音_${d.getFullYear()}${pad(d.getMonth() + 1)}${pad(d.getDate())}_${pad(d.getHours())}${pad(d.getMinutes())}.${ext}`;
+  const isIOS = /iP(hone|ad|od)/.test(navigator.userAgent) || (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1);
+  if(isIOS && navigator.canShare){
+    const f = new File([r.blob], fname, { type: r.type });
+    if(navigator.canShare({ files: [f] })){ navigator.share({ files: [f] }).catch(() => {}); return; }
+  }
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(r.blob); a.download = fname;
+  document.body.appendChild(a); a.click(); a.remove();
+  setTimeout(() => URL.revokeObjectURL(a.href), 5000);
+}
+$('#recBtn').onclick = () => (recorder ? stopRec() : startRec());
+$('#recTest').onclick = async () => {
+  if(recorder) return;
+  if(recStream){ closeInput(); return; }
+  if(!canRecord){ toast('この端末・ブラウザでは録音できません'); return; }
+  try{ await openInput(); toast('入力チェック中：音を出すとメーターが動きます'); }catch(e){ toast('入力を開けませんでした（接続とマイクの許可を確認してください）'); closeInput(); }
+};
+$('#recRefresh').onclick = async () => {
+  if(!canRecord) return;
+  if(!recStream && !recorder){ try{ await openInput(); closeInput(); }catch(e){ toast('マイクの使用が許可されていません'); } }
+  await listInputs(); toast('入力の一覧を更新しました');
+};
+$('#recIn').onchange = async () => {
+  prefs.recIn = $('#recIn').value; store.set('renshu:prefs', prefs);
+  if(recStream && !recorder){ closeInput(); try{ await openInput(); }catch(e){ toast('この入力を開けませんでした'); } }
+};
+if(canRecord && navigator.mediaDevices.addEventListener) navigator.mediaDevices.addEventListener('devicechange', listInputs);
+audio.addEventListener('play', () => { if(recPlayer) stopRecPlay(); });
+listInputs(); renderRecs();
 
 /* ---------- 試用版だけの停止スイッチ（本番版では何もしない） ----------
    status.json の active を false にすると使えなくなる。until（例 "2026-12-31"）を過ぎても止まる。
